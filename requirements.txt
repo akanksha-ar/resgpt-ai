@@ -11,3 +11,7 @@ langchain
 langchain-community
 langchain-text-splitters
 sentence-transformers
+requests
+python-dotenv
+pdfplumber
+
