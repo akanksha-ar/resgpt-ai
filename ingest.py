@@ -30,17 +30,16 @@ def ingest_file(uploaded_file):
 
         elif filename.endswith(".csv"):
             df = pd.read_csv(file_path)
-            return df.to_string(index=False), None
+            return {"type": "table", "df": df}, None
 
         elif filename.endswith(".xlsx"):
-            df = pd.read_excel(file_path, engine="openpyxl")
-            return df.to_string(index=False), None
+            df = pd.read_excel(file_path)
+            return {"type": "table", "df": df}, None
 
         elif filename.endswith(".pdf"):
             text = extract_pdf_text(file_path)
-            if not text.strip():
-                return None, "No readable text found in PDF"
-            return text, None
+            return {"type": "document", "text": text}, None
+
 
         else:
             return None, "Unsupported file type"
