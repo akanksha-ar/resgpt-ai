@@ -2,175 +2,210 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
-import requests
+import pandas as pd
 import os
+import requests
+
 from ingest import ingest_file
+from pdf_chunks import chunk_text
+from vector_store import add_chunks, search
 
 
-
-# -------------------------------------------------
-# Page config
-# -------------------------------------------------
+# =================================================
+# CONFIG
+# =================================================
 st.set_page_config(page_title="RESGPT.AI", page_icon="🤖", layout="wide")
+CHUNK_SIZE = 2000
 
-# -------------------------------------------------
-# Session state
-# -------------------------------------------------
+
+# =================================================
+# SESSION STATE
+# =================================================
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "uploaded_file_content" not in st.session_state:
-    st.session_state.uploaded_file_content = None
+if "dataframes" not in st.session_state:
+    st.session_state.dataframes = {}   # filename -> DataFrame
 
-if "uploaded_file_name" not in st.session_state:
-    st.session_state.uploaded_file_name = None
+if "text_chunks" not in st.session_state:
+    st.session_state.text_chunks = {}  # filename -> list of chunks
+
+if "processed_files" not in st.session_state:
+    st.session_state.processed_files = set()
 
 
-# -------------------------------------------------
-# Title
-# -------------------------------------------------
+# =================================================
+# UI
+# =================================================
 st.title("🤖 RESGPT.AI")
-st.markdown("💡 *Upload a document first, then ask questions about its content*")
+st.markdown("💡 Upload CSV / Excel / PDF / TXT and ask **fact-correct questions**")
 
 
-# -------------------------------------------------
-# Sidebar – File Upload & Ingestion
-# -------------------------------------------------
+# =================================================
+# SIDEBAR – FILE UPLOAD
+# =================================================
 with st.sidebar:
-    st.header("📁 Upload Document")
+    st.header("📁 Upload Documents")
 
-    uploaded_file = st.file_uploader(
-        "Choose a file",
-        type=["pdf", "csv", "xlsx", "txt", "docx"],
-        help="Upload a document to analyze"
+    files = st.file_uploader(
+        "Choose file(s)",
+        type=["csv", "xlsx", "pdf", "txt"],
+        accept_multiple_files=True
     )
 
-# 🔍 TEMP DEBUG — ADD EXACTLY HERE
-    st.sidebar.caption(
-        f"Using API key ending with: {os.getenv('CLAUDE_API_KEY')[-6:]}"
-    )
-    
-    if uploaded_file is not None:
-        with st.spinner("Processing file..."):
-            content, error = ingest_file(uploaded_file)
+    if files:
+        with st.spinner("Processing files..."):
+            for f in files:
+                if f.name in st.session_state.processed_files:
+                    continue
 
-        if error:
-            st.error(f"❌ {error}")
-            st.session_state.uploaded_file_content = None
-            st.session_state.uploaded_file_name = None
-        else:
-            st.success(f"✅ File uploaded & processed: {uploaded_file.name}")
-            st.session_state.uploaded_file_content = content
-            st.session_state.uploaded_file_name = uploaded_file.name
+                content, error = ingest_file(f)
+                if error:
+                    st.error(f"❌ {f.name}: {error}")
+                    continue
 
-            # 🔍 TEMP DEBUG (remove later)
-            st.text_area(
-                "Extracted Content (debug)",
-                content[:3000],
-                height=300
-            )
+                # ---------- CSV / XLSX ----------
+                if content["type"] == "table":
+                    df = content["df"]
+                    st.session_state.dataframes[f.name] = df
+
+                    st.success(
+                        f"📊 {f.name}: {len(df)} rows, {len(df.columns)} columns"
+                    )
+
+                # ---------- PDF / TXT ----------
+                elif content["type"] == "document":
+                    chunks = chunk_text(content["text"], CHUNK_SIZE)
+                    st.session_state.text_chunks[f.name] = chunks
+                    add_chunks(chunks)
+
+                    st.success(
+                        f"📄 {f.name}: indexed {len(chunks)} chunks"
+                    )
+
+                st.session_state.processed_files.add(f.name)
+
+        st.success(f"✅ {len(st.session_state.processed_files)} file(s) processed")
 
     if st.button("🗑️ Clear Chat"):
         st.session_state.messages = []
-        st.session_state.uploaded_file_content = None
-        st.session_state.uploaded_file_name = None
+        st.session_state.dataframes = {}
+        st.session_state.text_chunks = {}
+        st.session_state.processed_files = set()
         st.rerun()
 
 
-# -------------------------------------------------
-# Chat History
-# -------------------------------------------------
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# =================================================
+# CHAT HISTORY
+# =================================================
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
 
-# -------------------------------------------------
-# Chat Input + Claude API Call
-# -------------------------------------------------
-if prompt := st.chat_input("Ask a question about your document..."):
+# =================================================
+# CHAT INPUT
+# =================================================
+if prompt := st.chat_input("Ask a question about your files..."):
 
-    # Safety check
-    if not st.session_state.uploaded_file_content or len(st.session_state.uploaded_file_content.strip()) == 0:
-        st.warning("⚠️ Please upload and process a document first.")
+    if not st.session_state.processed_files:
+        st.warning("⚠️ Upload a file first")
         st.stop()
 
-    # Show user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+    prompt_lower = prompt.lower()
 
-            try:
-                api_key = os.getenv("CLAUDE_API_KEY")
-                if not api_key:
-                    st.error("❌ CLAUDE_API_KEY not found in environment variables")
-                    st.stop()
+    # =================================================
+    # ✅ CSV / XLSX — FACT-SAFE ANSWERS (NO AI)
+    # =================================================
+    if st.session_state.dataframes:
+        df = list(st.session_state.dataframes.values())[0]
 
-                # Build prompt
-                full_prompt = f"""
-You are answering questions strictly based on the following document.
+        # ---- COUNT ----
+        if "count" in prompt_lower or "total" in prompt_lower:
+            answer = f"✅ Total number of records: **{len(df)}**"
+            st.markdown(answer)
+            st.session_state.messages.append(
+                {"role": "assistant", "content": answer}
+            )
+            st.stop()
 
-<document>
-{st.session_state.uploaded_file_content[:12000]}
-</document>
+        # ---- COLUMN VALUES ----
+        for col in df.columns:
+            if col.lower() in prompt_lower:
+                values = df[col].dropna().astype(str).tolist()
+
+                answer = (
+                    f"✅ Column `{col}` has **{len(values)}** values:\n\n"
+                    + "\n".join(f"- {v}" for v in values[:200])
+                )
+
+                st.markdown(answer)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer}
+                )
+                st.stop()
+
+
+    # =================================================
+    # 📄 PDF / TXT — VECTOR SEARCH + CLAUDE
+    # =================================================
+    api_key = os.getenv("CLAUDE_API_KEY")
+    if not api_key:
+        st.error("❌ CLAUDE_API_KEY not set")
+        st.stop()
+
+    context_chunks = search(prompt)
+    context = "\n\n".join(context_chunks)
+
+    full_prompt = f"""
+Use ONLY the information below.
+Do NOT invent facts.
+
+<context>
+{context}
+</context>
 
 Question:
 {prompt}
 """
 
-                # -------------------------
-                # ✅ CLAUDE API CALL (CORRECT)
-                # -------------------------
-                headers = {
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                }
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            headers = {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            }
 
-                payload = {
-                    "model": "claude-3-haiku-20240307",
-                    "max_tokens": 800,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": full_prompt
-                        }
-                    ]
-                }
+            payload = {
+                "model": "claude-3-haiku-20240307",
+                "max_tokens": 800,
+                "messages": [{"role": "user", "content": full_prompt}]
+            }
 
-                response = requests.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers=headers,
-                    json=payload,
-                    timeout=60
-                )
+            response = requests.post(
+                "https://api.anthropic.com/v1/messages",
+                headers=headers,
+                json=payload,
+                timeout=60
+            )
 
-                if response.status_code == 200:
-                    answer = response.json()["content"][0]["text"]
-                    st.markdown(answer)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": answer}
-                    )
-                else:
-                    error_msg = f"❌ Claude API Error {response.status_code}: {response.text}"
-                    st.error(error_msg)
-                    st.session_state.messages.append(
-                        {"role": "assistant", "content": error_msg}
-                    )
-
-            except Exception as e:
-                error_msg = f"❌ Error: {str(e)}"
-                st.error(error_msg)
+            if response.status_code == 200:
+                answer = response.json()["content"][0]["text"]
+                st.markdown(answer)
                 st.session_state.messages.append(
-                    {"role": "assistant", "content": error_msg}
+                    {"role": "assistant", "content": answer}
                 )
+            else:
+                st.error(response.text)
 
 
-# -------------------------------------------------
-# Footer
-# -------------------------------------------------
+# =================================================
+# FOOTER
+# =================================================
 st.markdown("---")
-st.markdown("🚀 **RESGPT.AI** – Document-aware Q&A powered by AI")
+st.markdown("🚀 **RESGPT.AI** – Secure, document-aware Q&A powered by AI")
