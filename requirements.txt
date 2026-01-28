@@ -3,6 +3,8 @@ uvicorn
 streamlit
 python-multipart
 pandas
+requests
+pdfplumber
 PyPDF2
 python-docx
 anthropic
@@ -15,3 +17,4 @@ duckdb
 scikit-learn
 pyodbc
 sqlalchemy
+
