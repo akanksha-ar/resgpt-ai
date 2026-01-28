@@ -208,4 +208,5 @@ Question:
 # FOOTER
 # =================================================
 st.markdown("---")
-st.markdown("🚀 **RESGPT.AI** – Secure, document-aware Q&A powered by AI")
+st.markdown("🚀 **RESGPT.AI** – Document-aware Q&A powered by AI")
+
